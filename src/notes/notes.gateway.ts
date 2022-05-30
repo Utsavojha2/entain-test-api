@@ -28,6 +28,12 @@ export class NotesGateway {
     }
   }
 
+  async handleDisconnect(client: Socket){
+    await this.clientService.delete(client.id);
+    const newClientsList = await this.clientService.getAll();
+    this.server.emit('boardUsers', newClientsList);
+  }
+
   @UseGuards(WsGuard)
   @SubscribeMessage('joinBoard')
   async joinBoard(
@@ -50,13 +56,17 @@ export class NotesGateway {
     @ConnectedSocket() client: Socket,
     @MessageBody() createNoteDto: CreateNoteDto
   ) {
+    if(!createNoteDto.text) return;
     const message = { 
       ...createNoteDto, 
       userId: client.handshake.headers.userid as string,
       timestamp: Date.now()
     };
-    this.server.emit('note', message);
-    await this.notesService.create(message);
+    const createdMessage = await this.notesService.create(message);
+    this.server.emit('note', {
+      notesPayload: createdMessage,
+      isMutated: false
+    });
   }
 
   @UseGuards(WsGuard)
@@ -67,7 +77,53 @@ export class NotesGateway {
 
   @UseGuards(WsGuard)
   @SubscribeMessage('removeNote')
-  remove(@MessageBody() id: string) {
-    return this.notesService.delete(id);
+  async remove(@MessageBody() id: string) {
+    await this.notesService.delete(id);
+    const whiteboardNotes = await this.notesService.getAll();
+    this.server.emit('note', {
+      notesPayload: whiteboardNotes,
+      isMutated: true
+    });
+  }
+
+  @UseGuards(WsGuard)
+  @SubscribeMessage('reorderNotes')
+  async reorderNoteList(
+    @ConnectedSocket() client: Socket,
+    @MessageBody() indexes: Record<string, number>
+  ) {
+    const { startIndex, endIndex } = indexes;
+    const whiteboardNotes = await this.notesService.getAll()
+    const reorderRequestNotes = whiteboardNotes.filter((_el, idx) => (
+      idx === startIndex || idx === endIndex
+    ))
+    const doesBelongToCurrentUser = reorderRequestNotes.every((note) => note.userId === client.handshake.headers.userid as string);
+    if(!doesBelongToCurrentUser){
+      throw new WsException('You are not authorized to reorder notes');
+    }
+    const appNotesList = [...whiteboardNotes];
+    const dragItemContent = appNotesList[startIndex];
+    appNotesList.splice(startIndex, 1);
+    appNotesList.splice(endIndex, 0, dragItemContent);
+    whiteboardNotes.forEach(async(note) => {
+      await this.notesService.delete(note.id);
+    });
+    await this.notesService.createMany(appNotesList);
+    const newNotesList = await this.notesService.getAll();
+    this.server.emit('note', {
+      notesPayload: newNotesList,
+      isMutated: true
+    });
+  } 
+
+  @UseGuards(WsGuard)
+  @SubscribeMessage('updateNote')
+  async updateNodeItem(@MessageBody() note: NoteEntity) {
+    await this.notesService.update(note);
+    const updatedNotesList = await this.notesService.getAll();
+    this.server.emit('note', {
+      notesPayload: updatedNotesList,
+      isUpdated: true
+    });
   }
 }
